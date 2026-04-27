@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.git/
+.gitignore
+.dockerignore
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+*.log
+.env
+.env.*
+coverage/
+playwright-report/
+test-results/
+

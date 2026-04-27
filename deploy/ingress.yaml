@@ -1,0 +1,27 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: orchestrator
+  namespace: orchestrator
+  annotations:
+    oci-native-ingress.oraclecloud.com/backend-tls-enabled: "false"
+    oci-native-ingress.oraclecloud.com/healthcheck-path: /healthz
+    oci-native-ingress.oraclecloud.com/healthcheck-protocol: HTTP
+    oci-native-ingress.oraclecloud.com/https-listener-port: "443"
+spec:
+  ingressClassName: ic
+  tls:
+    - hosts:
+        - orchestrator.sogawa-yk.com
+      secretName: wildcard-sogawa-yk-com-tls
+  rules:
+    - host: orchestrator.sogawa-yk.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: orchestrator
+                port:
+                  number: 8000

@@ -1,0 +1,19 @@
+# tool description の外出し。改善ループで更新する。
+# 各 tool は @function_tool の docstring が一次情報。ここはオーバーライド用。
+list_remote_agents: |
+  利用可能なリモートエージェントの一覧を返す。返り値は agent_id, display_name, tags, enabled, description のサマリ。
+  特定エージェントの能力詳細は describe_remote_agent で取得する。
+
+describe_remote_agent: |
+  指定 agent_id の AgentCard を取得し、skills と承認要否ヒントを返す。
+  返り値の各 skill には needs_approval が付く。true なら call_remote_agent の前に必ず request_user_approval を呼ぶこと。
+
+request_user_approval: |
+  ユーザーに承認 UI を提示する。Approve なら decision=approved, Reject なら decision=rejected を返す。
+  payload には呼び出し予定の対象/影響を簡潔に書く (UI に表示される)。
+
+call_remote_agent: |
+  リモートエージェントを A2A プロトコルで呼び出す。
+  - 承認必須スキルで、当該会話で approved を取得していない場合は denied=true で即時失敗
+  - input-required で中断された場合はツール内部でユーザーに追加質問してから再開する
+  - context_id を渡すと同一会話として継続される

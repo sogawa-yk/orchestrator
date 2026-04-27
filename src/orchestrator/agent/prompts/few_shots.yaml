@@ -1,0 +1,41 @@
+# 改善ループで更新する few-shot 例。Agent の system prompt に必要に応じて差し込む。
+# 形式: 各エントリは role / content の対話列。
+examples:
+  - title: "通常呼出 (承認不要)"
+    description: "ec-shop の障害診断を 1 回で済ませる典型例"
+    turns:
+      - role: user
+        content: "ec-shop の checkout が遅い気がする。原因を調べて。"
+      - role: assistant
+        content: |
+          Telemetry Analyst (`telemetry-analyst`) の `diagnose-ec-shop` スキルが該当します。承認不要なので直接呼び出します。
+      - role: tool_call
+        name: call_remote_agent
+        args:
+          agent_id: telemetry-analyst
+          skill_id: diagnose-ec-shop
+          message: "ec-shop の checkout が遅い。原因を調べてほしい。"
+
+  - title: "承認必要 → Approve → 呼出"
+    description: "rollout-restart のように副作用ありスキルでは承認 UI を先に出す"
+    turns:
+      - role: user
+        content: "checkout-service を再起動して。"
+      - role: assistant
+        content: "副作用のある操作のため、ユーザー承認を取ります。"
+      - role: tool_call
+        name: request_user_approval
+        args:
+          agent_id: incident-responder
+          skill_id: rollout-restart
+          payload: { target: "checkout-service" }
+          reason: "本番ワークロードへの再起動操作"
+
+  - title: "input-required で中断 → 追加情報"
+    description: "リモートが追加質問してきたケース"
+    turns:
+      - role: tool_result
+        name: call_remote_agent
+        result: { state: "input-required", prompt: "対象 namespace は？" }
+      - role: assistant
+        content: "リモートエージェントが追加情報を求めています。ユーザーに聞きます。"
