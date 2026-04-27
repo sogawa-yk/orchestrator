@@ -1,13 +1,19 @@
-"""Langfuse Datasets に Orchestrator の golden サンプル 15 件を upsert する。
+"""Langfuse Datasets に Orchestrator の golden サンプルを upsert する。
 
-カテゴリと件数:
+現在 active なカテゴリ:
 - 通常診断 (承認不要)            4
-- 承認必要 → Approve            2
-- 承認必要 → Reject              2
-- 承認却下後の代替提案            2 (Reject の発展)
 - input-required 中断・再開       2
 - 失敗系 (401 / Timeout / 不明)   2
 - マルチターン文脈継続           2
+
+deferred (将来「承認必須」リモートエージェント追加時に有効化):
+- 承認必要 → Approve            2
+- 承認必要 → Reject              2
+- 承認却下後の代替提案            2
+
+`upsert_to_langfuse()` は active のみ Langfuse に登録する。
+`DEFERRED_PRIVILEGED_ITEMS` は ConfigMap に承認必須エージェントを追加してから
+GOLDEN_ITEMS に統合し直す。
 """
 from __future__ import annotations
 
@@ -59,92 +65,7 @@ GOLDEN_ITEMS: list[GoldenItem] = [
         expected_output={"contains": ["cart"], "should_call": ["call_remote_agent"]},
         metadata={"agent": "telemetry-analyst", "skill": "diagnose-ec-shop", "approval": "none"},
     ),
-    # 承認必要 → Approve 2
-    GoldenItem(
-        id="appr-approve-priv-pods",
-        category="approval-approved",
-        inputs=[
-            {"role": "user", "content": "高権限プロファイルで ec-shop の Pod を診断して"},
-            {"role": "system", "content": "[テスト前提] 承認 UI で Approve を選ぶ"},
-        ],
-        expected_output={
-            "should_call": ["request_user_approval", "call_remote_agent"],
-            "approval_must_precede_call": True,
-        },
-        metadata={"agent": "telemetry-analyst-privileged", "skill": "diagnose-ec-shop", "approval": "approved"},
-    ),
-    GoldenItem(
-        id="appr-approve-priv-5xx",
-        category="approval-approved",
-        inputs=[
-            {"role": "user", "content": "高権限で 5xx を調査して"},
-            {"role": "system", "content": "[テスト前提] 承認 UI で Approve を選ぶ"},
-        ],
-        expected_output={
-            "should_call": ["request_user_approval", "call_remote_agent"],
-            "approval_must_precede_call": True,
-        },
-        metadata={"agent": "telemetry-analyst-privileged", "skill": "diagnose-ec-shop", "approval": "approved"},
-    ),
-    # 承認必要 → Reject 2
-    GoldenItem(
-        id="appr-reject-priv-pods",
-        category="approval-rejected",
-        inputs=[
-            {"role": "user", "content": "高権限プロファイルで ec-shop の Pod を診断して"},
-            {"role": "system", "content": "[テスト前提] 承認 UI で Reject を選ぶ"},
-        ],
-        expected_output={
-            "should_call": ["request_user_approval"],
-            "should_not_call": ["call_remote_agent"],
-            "final_must_mention": ["却下", "代替"],
-        },
-        metadata={"agent": "telemetry-analyst-privileged", "skill": "diagnose-ec-shop", "approval": "rejected"},
-    ),
-    GoldenItem(
-        id="appr-reject-priv-cart",
-        category="approval-rejected",
-        inputs=[
-            {"role": "user", "content": "高権限で cart の状態を診断して"},
-            {"role": "system", "content": "[テスト前提] 承認 UI で Reject を選ぶ"},
-        ],
-        expected_output={
-            "should_call": ["request_user_approval"],
-            "should_not_call": ["call_remote_agent"],
-            "final_must_mention": ["却下"],
-        },
-        metadata={"agent": "telemetry-analyst-privileged", "skill": "diagnose-ec-shop", "approval": "rejected"},
-    ),
-    # 却下後の代替提案 (Reject 後にユーザーが代替を求める) 2
-    GoldenItem(
-        id="appr-reject-then-alt-pods",
-        category="rejected-alternative",
-        inputs=[
-            {"role": "user", "content": "高権限プロファイルで ec-shop の Pod を診断して"},
-            {"role": "system", "content": "[テスト前提] 承認 UI で Reject"},
-            {"role": "user", "content": "じゃあ承認不要のプロファイルで同じ調査して"},
-        ],
-        expected_output={
-            "should_call": ["request_user_approval", "call_remote_agent"],
-            "second_call_agent": "telemetry-analyst",
-        },
-        metadata={"category_note": "却下後に承認不要エージェントへ切り替え"},
-    ),
-    GoldenItem(
-        id="appr-reject-then-alt-5xx",
-        category="rejected-alternative",
-        inputs=[
-            {"role": "user", "content": "高権限で 5xx を確認して"},
-            {"role": "system", "content": "[テスト前提] 承認 UI で Reject"},
-            {"role": "user", "content": "通常プロファイルで再度お願い"},
-        ],
-        expected_output={
-            "should_call": ["request_user_approval", "call_remote_agent"],
-            "second_call_agent": "telemetry-analyst",
-        },
-        metadata={},
-    ),
-    # input-required (現状 ta-agent では再現しないためモック想定) 2
+    # input-required 2 (現状 ta-agent では再現しないためモック想定)
     GoldenItem(
         id="input-req-namespace",
         category="input-required",
@@ -212,16 +133,105 @@ GOLDEN_ITEMS: list[GoldenItem] = [
 ]
 
 
+# === deferred: 承認必須リモートエージェントが追加されたら GOLDEN_ITEMS に統合 ===
+DEFERRED_PRIVILEGED_ITEMS: list[GoldenItem] = [
+    # 承認必要 → Approve 2
+    GoldenItem(
+        id="appr-approve-priv-pods",
+        category="approval-approved",
+        inputs=[
+            {"role": "user", "content": "高権限プロファイルで ec-shop の Pod を診断して"},
+            {"role": "system", "content": "[テスト前提] 承認 UI で Approve を選ぶ"},
+        ],
+        expected_output={
+            "should_call": ["request_user_approval", "call_remote_agent"],
+            "approval_must_precede_call": True,
+        },
+        metadata={"agent": "<privileged>", "skill": "diagnose-ec-shop", "approval": "approved"},
+    ),
+    GoldenItem(
+        id="appr-approve-priv-5xx",
+        category="approval-approved",
+        inputs=[
+            {"role": "user", "content": "高権限で 5xx を調査して"},
+            {"role": "system", "content": "[テスト前提] 承認 UI で Approve を選ぶ"},
+        ],
+        expected_output={
+            "should_call": ["request_user_approval", "call_remote_agent"],
+            "approval_must_precede_call": True,
+        },
+        metadata={"agent": "<privileged>", "skill": "diagnose-ec-shop", "approval": "approved"},
+    ),
+    # 承認必要 → Reject 2
+    GoldenItem(
+        id="appr-reject-priv-pods",
+        category="approval-rejected",
+        inputs=[
+            {"role": "user", "content": "高権限プロファイルで ec-shop の Pod を診断して"},
+            {"role": "system", "content": "[テスト前提] 承認 UI で Reject を選ぶ"},
+        ],
+        expected_output={
+            "should_call": ["request_user_approval"],
+            "should_not_call": ["call_remote_agent"],
+            "final_must_mention": ["却下", "代替"],
+        },
+        metadata={"agent": "<privileged>", "skill": "diagnose-ec-shop", "approval": "rejected"},
+    ),
+    GoldenItem(
+        id="appr-reject-priv-cart",
+        category="approval-rejected",
+        inputs=[
+            {"role": "user", "content": "高権限で cart の状態を診断して"},
+            {"role": "system", "content": "[テスト前提] 承認 UI で Reject を選ぶ"},
+        ],
+        expected_output={
+            "should_call": ["request_user_approval"],
+            "should_not_call": ["call_remote_agent"],
+            "final_must_mention": ["却下"],
+        },
+        metadata={"agent": "<privileged>", "skill": "diagnose-ec-shop", "approval": "rejected"},
+    ),
+    # 却下後の代替提案 2
+    GoldenItem(
+        id="appr-reject-then-alt-pods",
+        category="rejected-alternative",
+        inputs=[
+            {"role": "user", "content": "高権限プロファイルで ec-shop の Pod を診断して"},
+            {"role": "system", "content": "[テスト前提] 承認 UI で Reject"},
+            {"role": "user", "content": "じゃあ承認不要のプロファイルで同じ調査して"},
+        ],
+        expected_output={
+            "should_call": ["request_user_approval", "call_remote_agent"],
+            "second_call_agent": "telemetry-analyst",
+        },
+        metadata={"category_note": "却下後に承認不要エージェントへ切り替え"},
+    ),
+    GoldenItem(
+        id="appr-reject-then-alt-5xx",
+        category="rejected-alternative",
+        inputs=[
+            {"role": "user", "content": "高権限で 5xx を確認して"},
+            {"role": "system", "content": "[テスト前提] 承認 UI で Reject"},
+            {"role": "user", "content": "通常プロファイルで再度お願い"},
+        ],
+        expected_output={
+            "should_call": ["request_user_approval", "call_remote_agent"],
+            "second_call_agent": "telemetry-analyst",
+        },
+        metadata={},
+    ),
+]
+
+
 def upsert_to_langfuse() -> dict[str, Any]:
-    """Langfuse Datasets に golden 15 件を作成 (既存があれば追加のみ)。"""
+    """Langfuse Datasets に active な golden を upsert する (deferred は除外)。"""
     client = get_langfuse_client(get_settings())
     if client is None:
         return {"ok": False, "reason": "Langfuse client unavailable (key 未設定)"}
 
-    # Dataset が無ければ作る
     try:
-        client.create_dataset(name=DATASET_NAME, description="Orchestrator P3 golden 15")
-    except Exception:  # noqa: BLE001 — 既存 Dataset の場合 409 を投げる SDK 実装あり
+        client.create_dataset(name=DATASET_NAME, description="Orchestrator P3 golden")
+    except Exception:  # noqa: BLE001 — 既存 Dataset の場合は無視
         pass
 
     created = 0
@@ -235,15 +245,15 @@ def upsert_to_langfuse() -> dict[str, Any]:
                 metadata={**item.metadata, "category": item.category, "id": item.id},
             )
             created += 1
-        except Exception as e:  # noqa: BLE001
-            # 既存 item の場合は skip としてカウント
+        except Exception:  # noqa: BLE001
             skipped += 1
             continue
 
     return {
         "ok": True,
         "dataset": DATASET_NAME,
-        "total": len(GOLDEN_ITEMS),
+        "active_total": len(GOLDEN_ITEMS),
+        "deferred_total": len(DEFERRED_PRIVILEGED_ITEMS),
         "created": created,
         "skipped": skipped,
     }

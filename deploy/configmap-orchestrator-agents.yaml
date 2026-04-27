@@ -15,7 +15,6 @@ data:
         backoff_seconds: 1.5
       card_cache_ttl_seconds: 600
     agents:
-      # 承認不要で呼べるリモート (本来の動線)
       - id: telemetry-analyst
         display_name: "Telemetry Analyst (ec-shop 障害診断)"
         base_url: "http://ta-agent.telemetry-analyst.svc:8080/a2a"
@@ -33,22 +32,7 @@ data:
         notes: |
           Streaming 未対応 (v0.2.9). text のみ.
 
-      # 同じ ta-agent を「承認必須」プロファイルで再登録 (P2 承認フローの実機検証用)
-      # 同一 base_url を別 agent_id で見せ、承認 UI が出ること、Approve/Reject に従うことを確認する
-      - id: telemetry-analyst-privileged
-        display_name: "Telemetry Analyst (高権限プロファイル / 承認必須)"
-        base_url: "http://ta-agent.telemetry-analyst.svc:8080/a2a"
-        auth:
-          kind: bearer
-          token_env: TA_AGENT_A2A_TOKEN
-        enabled: true
-        tags: [observability, privileged]
-        approval:
-          default: required
-          skills:
-            diagnose-ec-shop:
-              requires_approval: true
-              reason: "高権限プロファイルとして承認 UI 動作確認用"
-        notes: |
-          物理的には telemetry-analyst と同じ ta-agent を呼ぶが、registry policy で承認必須に
-          上書きしているテスト用エントリ。本番削除可能。
+      # 注: 将来「副作用あり / 承認必須」のリモートエージェント (例: incident-responder) が
+      #     クラスタに追加されたら、ここに requires_approval: true のエントリを足し、
+      #     orchestrator の承認 UI (Chainlit AskActionMessage) が動くことを確認する。
+      #     現時点では連携先が telemetry-analyst (read-only) のみなので承認系は未使用。
