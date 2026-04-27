@@ -16,6 +16,7 @@ from ..a2a_client import (
     resolve_bearer_token,
 )
 from ..approval import chainlit_ui, session_state
+from ..observability import metrics as _metrics
 from ..registry.policy import requires_approval
 from .context import OrchestratorContext
 
@@ -35,18 +36,19 @@ async def list_remote_agents(
 ) -> list[dict[str, Any]]:
     """利用可能なリモートエージェントの一覧を返す。"""
     c = _ctx(ctx)
-    out: list[dict[str, Any]] = []
-    for a in c.registry.enabled_agents():
-        out.append(
-            {
-                "agent_id": a.id,
-                "display_name": a.display_name,
-                "tags": list(a.tags),
-                "enabled": a.enabled,
-                "notes": a.notes,
-            }
-        )
-    return out
+    with _metrics.measure_tool_latency("list_remote_agents"):
+        out: list[dict[str, Any]] = []
+        for a in c.registry.enabled_agents():
+            out.append(
+                {
+                    "agent_id": a.id,
+                    "display_name": a.display_name,
+                    "tags": list(a.tags),
+                    "enabled": a.enabled,
+                    "notes": a.notes,
+                }
+            )
+        return out
 
 
 @function_tool
@@ -56,40 +58,41 @@ async def describe_remote_agent(
 ) -> dict[str, Any]:
     """指定エージェントの詳細 (skills と承認要否ヒント) を返す。"""
     c = _ctx(ctx)
-    agent = c.registry.get(agent_id)
-    if agent is None or not agent.enabled:
-        return {
-            "error": f"agent_id={agent_id} は利用不能",
-            "available_agents": [a.id for a in c.registry.enabled_agents()],
-        }
-    token = resolve_bearer_token(agent)
-    try:
-        card = await c.card_cache.get(agent.id, agent.base_url, token)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("AgentCard 取得失敗 agent=%s: %s", agent.id, e)
-        return {"error": f"AgentCard 取得失敗: {e}"}
-    skills_out: list[dict[str, Any]] = []
-    for s in card.get("skills") or []:
-        sid = s.get("id")
-        if not sid:
-            continue
-        skills_out.append(
-            {
-                "id": sid,
-                "name": s.get("name"),
-                "description": s.get("description"),
-                "tags": s.get("tags") or [],
-                "needs_approval": requires_approval(agent, sid, agent_card=card),
+    with _metrics.measure_tool_latency("describe_remote_agent"):
+        agent = c.registry.get(agent_id)
+        if agent is None or not agent.enabled:
+            return {
+                "error": f"agent_id={agent_id} は利用不能",
+                "available_agents": [a.id for a in c.registry.enabled_agents()],
             }
-        )
-    return {
-        "agent_id": agent.id,
-        "display_name": agent.display_name,
-        "version": card.get("version"),
-        "description": card.get("description"),
-        "capabilities": card.get("capabilities") or {},
-        "skills": skills_out,
-    }
+        token = resolve_bearer_token(agent)
+        try:
+            card = await c.card_cache.get(agent.id, agent.base_url, token)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("AgentCard 取得失敗 agent=%s: %s", agent.id, e)
+            return {"error": f"AgentCard 取得失敗: {e}"}
+        skills_out: list[dict[str, Any]] = []
+        for s in card.get("skills") or []:
+            sid = s.get("id")
+            if not sid:
+                continue
+            skills_out.append(
+                {
+                    "id": sid,
+                    "name": s.get("name"),
+                    "description": s.get("description"),
+                    "tags": s.get("tags") or [],
+                    "needs_approval": requires_approval(agent, sid, agent_card=card),
+                }
+            )
+        return {
+            "agent_id": agent.id,
+            "display_name": agent.display_name,
+            "version": card.get("version"),
+            "description": card.get("description"),
+            "capabilities": card.get("capabilities") or {},
+            "skills": skills_out,
+        }
 
 
 @function_tool(strict_mode=False)
@@ -109,7 +112,7 @@ async def request_user_approval(
             "skill.id": skill_id,
             "approval.reason": reason,
         },
-    ) as span:
+    ) as span, _metrics.measure_tool_latency("request_user_approval"):
         result = await chainlit_ui.ask_action(
             agent_id=agent_id, skill_id=skill_id, payload=payload, reason=reason
         )
@@ -119,6 +122,7 @@ async def request_user_approval(
             session_state.record_approval(
                 c.approval_decisions, agent_id, skill_id, decision  # type: ignore[arg-type]
             )
+        _metrics.record_approval(agent_id, skill_id, decision)
         return result
 
 
@@ -151,6 +155,7 @@ async def call_remote_agent(
             c.approval_decisions, agent_id, skill_id
         )
         if decision != "approved":
+            _metrics.record_agent_call(agent_id, skill_id, "denied")
             return {
                 "error": "承認が必要なスキルです。先に request_user_approval を呼んでください。",
                 "needs_approval": True,
@@ -168,8 +173,9 @@ async def call_remote_agent(
     if cid:
         span_attrs["context.id"] = cid
 
-    with tracer.start_as_current_span("tool.call_remote_agent", attributes=span_attrs) as span:
+    with tracer.start_as_current_span("tool.call_remote_agent", attributes=span_attrs) as span, _metrics.measure_tool_latency("call_remote_agent"):
         timeout_s = c.registry.defaults.timeout_seconds
+        outcome = "failed"
         try:
             async with A2AClient(
                 agent,
@@ -185,7 +191,8 @@ async def call_remote_agent(
                     span.set_attribute("a2a.state", "input-required")
                     user_text = await chainlit_ui.ask_input(e.prompt)
                     if not user_text:
-                        # ユーザー無応答 → cancel して失敗扱い
+                        outcome = "input_required_canceled"
+                        _metrics.record_agent_call(agent_id, skill_id, outcome)
                         return {
                             "error": "input-required で無応答のため中止",
                             "state": "canceled",
@@ -197,13 +204,20 @@ async def call_remote_agent(
                         task_id=e.task_id or "",
                         context_id=e.context_id,
                     )
+                    outcome = "input_required_resumed"
+                else:
+                    outcome = "success"
         except RemoteAgentUnauthorized as e:
+            _metrics.record_agent_call(agent_id, skill_id, "unauthorized")
             return {"error": f"unauthorized: {e}", "kind": "unauthorized"}
         except RemoteAgentUnavailable as e:
+            _metrics.record_agent_call(agent_id, skill_id, "unavailable")
             return {"error": f"unavailable: {e}", "kind": "unavailable"}
         except RemoteAgentTimeout as e:
+            _metrics.record_agent_call(agent_id, skill_id, "timeout")
             return {"error": f"timeout: {e}", "kind": "timeout"}
         except RemoteAgentFailed as e:
+            _metrics.record_agent_call(agent_id, skill_id, "failed")
             return {"error": f"failed: {e}", "kind": "failed"}
 
         if res.context_id:
@@ -212,6 +226,7 @@ async def call_remote_agent(
         span.set_attribute("a2a.state", res.state)
         if res.task_id:
             span.set_attribute("a2a.task.id", res.task_id)
+        _metrics.record_agent_call(agent_id, skill_id, outcome)
 
         return {
             "final_text": res.final_text,

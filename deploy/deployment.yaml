@@ -28,7 +28,7 @@ spec:
         - name: ocir
       containers:
         - name: web
-          image: syd.ocir.io/orasejapan/orchestrator:0.1.2
+          image: syd.ocir.io/orasejapan/orchestrator:0.2.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
