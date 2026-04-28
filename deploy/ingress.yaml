@@ -12,10 +12,10 @@ spec:
   ingressClassName: ic
   tls:
     - hosts:
-        - orchestrator.sogawa-yk.com
+        - orchestrator.devday26.sogawa-yk.com
       secretName: wildcard-sogawa-yk-com-tls
   rules:
-    - host: orchestrator.sogawa-yk.com
+    - host: orchestrator.devday26.sogawa-yk.com
       http:
         paths:
           - path: /
