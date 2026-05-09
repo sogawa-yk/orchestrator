@@ -1,3 +1,9 @@
+# 新エージェント追加手順:
+#   1. 下の agents: にエントリ追加 (id / base_url / auth.token_env)
+#   2. Secret `orchestrator-a2a-tokens` に auth.token_env と同名キーを追加
+#   3. (別 namespace 宛のみ) networkpolicy.yaml に egress 1 ルール追加
+#
+# ローカル開発では本 ConfigMap の代わりに環境変数 A2A_AGENTS_JSON (JSON 1 本) でも定義可。
 apiVersion: v1
 kind: ConfigMap
 metadata:

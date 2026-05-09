@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     orch_agents_path: Path = Field(
         default=Path("/etc/orchestrator/agents.yaml"), alias="ORCH_AGENTS_PATH"
     )
+    a2a_agents_json: str = Field(default="", alias="A2A_AGENTS_JSON")
 
     # OTel
     otel_exporter_otlp_endpoint: str = Field(

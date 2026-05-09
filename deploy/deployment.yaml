@@ -36,6 +36,12 @@ spec:
           envFrom:
             - configMapRef:
                 name: orchestrator-config
+            # A2A エージェント用 Bearer トークンをまとめて注入する Secret。
+            # キー名は agents.yaml の auth.token_env と一致させる規約 (例: TA_AGENT_A2A_TOKEN)。
+            # 新エージェント追加時はこの Secret にキーを足すだけで本ファイルの変更不要。
+            - secretRef:
+                name: orchestrator-a2a-tokens
+                optional: true
           env:
             - name: OPENAI_API_KEY
               valueFrom:
@@ -52,11 +58,6 @@ spec:
                 secretKeyRef:
                   name: langfuse-keys
                   key: secret_key
-            - name: TA_AGENT_A2A_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: ta-agent-a2a-token
-                  key: token
             - name: K8S_POD_NAME
               valueFrom:
                 fieldRef:

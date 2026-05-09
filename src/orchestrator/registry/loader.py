@@ -7,8 +7,15 @@ import yaml
 from .models import Registry
 
 
-def load_registry(path: str | Path) -> Registry:
-    """ConfigMap (yaml) から Registry を読み込む。"""
+def load_registry(path: str | Path, *, json_text: str | None = None) -> Registry:
+    """Registry を読み込む。
+
+    優先順位:
+      1. ``json_text`` が非空 (空白のみは未設定扱い) → JSON としてパース
+      2. それ以外 → ``path`` の YAML ファイルをロード
+    """
+    if json_text is not None and json_text.strip():
+        return Registry.model_validate_json(json_text)
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"AgentRegistry yaml が見つからない: {p}")

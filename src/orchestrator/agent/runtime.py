@@ -37,7 +37,13 @@ def _build_available_agents_block(registry: Registry) -> str:
 
 def build_context(settings: Settings | None = None) -> OrchestratorContext:
     s = settings or get_settings()
-    registry = load_registry(s.orch_agents_path)
+    json_text = s.a2a_agents_json or None
+    if json_text and json_text.strip() and s.orch_agents_path:
+        logger.warning(
+            "A2A_AGENTS_JSON が設定されているため ORCH_AGENTS_PATH=%s は無視されます",
+            s.orch_agents_path,
+        )
+    registry = load_registry(s.orch_agents_path, json_text=json_text)
     cache = AgentCardCache(ttl_seconds=registry.defaults.card_cache_ttl_seconds)
     return OrchestratorContext(settings=s, registry=registry, card_cache=cache)
 

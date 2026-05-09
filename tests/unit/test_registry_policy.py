@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import textwrap
 
 import pytest
+import yaml
+from pydantic import ValidationError
 
 from orchestrator.registry import load_registry
 from orchestrator.registry.loader import load_registry_from_text
@@ -112,3 +115,47 @@ def test_card_does_not_override_explicit_true(reg) -> None:
 def test_unknown_skill_falls_back_to_default(reg) -> None:
     a = reg.get("telemetry-analyst")
     assert requires_approval(a, "unlisted") is False
+
+
+SAMPLE_JSON = json.dumps(yaml.safe_load(SAMPLE_YAML))
+
+
+def test_load_registry_from_json_env(tmp_path) -> None:
+    """A2A_AGENTS_JSON 経路: ファイル不在でも JSON で同等の Registry を組める。"""
+    reg_json = load_registry(tmp_path / "missing.yaml", json_text=SAMPLE_JSON)
+    reg_yaml = load_registry_from_text(SAMPLE_YAML)
+    assert {a.id for a in reg_json.agents} == {a.id for a in reg_yaml.agents}
+    assert [a.id for a in reg_json.enabled_agents()] == [
+        a.id for a in reg_yaml.enabled_agents()
+    ]
+
+
+def test_json_takes_precedence_over_yaml(tmp_path) -> None:
+    yaml_path = tmp_path / "agents.yaml"
+    yaml_path.write_text(SAMPLE_YAML, encoding="utf-8")
+    only_one = json.dumps(
+        {
+            "version": 1,
+            "agents": [
+                {
+                    "id": "json-only",
+                    "display_name": "JSON Only",
+                    "base_url": "http://json-only/a2a",
+                }
+            ],
+        }
+    )
+    reg = load_registry(yaml_path, json_text=only_one)
+    assert [a.id for a in reg.agents] == ["json-only"]
+
+
+def test_empty_json_falls_back_to_yaml(tmp_path) -> None:
+    yaml_path = tmp_path / "agents.yaml"
+    yaml_path.write_text(SAMPLE_YAML, encoding="utf-8")
+    reg = load_registry(yaml_path, json_text="   ")
+    assert {a.id for a in reg.agents} == {"telemetry-analyst", "incident-responder"}
+
+
+def test_invalid_json_raises(tmp_path) -> None:
+    with pytest.raises(ValidationError):
+        load_registry(tmp_path / "missing.yaml", json_text="{not json")
