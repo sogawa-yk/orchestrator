@@ -38,6 +38,14 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+    # iam-agent (OCI IAM / Identity Domains 運用支援)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: iam
+      ports:
+        - protocol: TCP
+          port: 80
     # Langfuse
     - to:
         - namespaceSelector:

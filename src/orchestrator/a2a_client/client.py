@@ -1,12 +1,39 @@
+"""A2A v1.0 クライアント (a2a-sdk ラッパ)。
+
+a2a-sdk 1.0.x の `BaseClient` + `JsonRpcTransport` を使い、orchestrator 既存呼び出し側
+(`tools.py`) と整合する `A2AClient` / `CallResult` の薄いアダプタを提供する。
+
+- `send_message`: `message/send` 相当を呼び、Task を完了状態まで進める。
+  `input-required` を検出したら `InputRequired` 例外を上げて呼び出し側で resume させる。
+- `resume_with_user_input`: 同じ task_id / context_id で `message/send` を追加投入。
+- リトライは接続系と 5xx に限定 (registry の `defaults.retry`)。401/4xx は即時失敗。
+"""
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+from a2a.client.base_client import BaseClient
+from a2a.client.client import ClientConfig
+from a2a.client.errors import A2AClientError, A2AClientTimeoutError
+from a2a.client.transports.jsonrpc import JsonRpcTransport
+from a2a.utils.errors import A2AError
+from a2a.types.a2a_pb2 import (
+    AgentCard,
+    AgentInterface,
+    Message,
+    Part,
+    Role,
+    SendMessageConfiguration,
+    SendMessageRequest,
+    StreamResponse,
+    Task,
+    TaskState,
+)
+from google.protobuf.json_format import MessageToDict
 from opentelemetry import trace
 from tenacity import (
     AsyncRetrying,
@@ -29,21 +56,19 @@ logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
 
 
-# A2A v1.0 Task state 値の正規化マップ (gRPC enum 名 / kebab 旧表記の両方を受ける)
-_STATE_MAP = {
-    "TASK_STATE_UNSPECIFIED": "unspecified",
-    "TASK_STATE_SUBMITTED": "submitted",
-    "TASK_STATE_WORKING": "working",
-    "TASK_STATE_INPUT_REQUIRED": "input-required",
-    "TASK_STATE_COMPLETED": "completed",
-    "TASK_STATE_CANCELED": "canceled",
-    "TASK_STATE_CANCELLED": "canceled",
-    "TASK_STATE_FAILED": "failed",
-    "TASK_STATE_REJECTED": "rejected",
-    "TASK_STATE_AUTH_REQUIRED": "auth-required",
+# A2A v1.0 Task state -> orchestrator 内部表記の正規化
+_STATE_MAP: dict[int, str] = {
+    TaskState.TASK_STATE_UNSPECIFIED: "unspecified",
+    TaskState.TASK_STATE_SUBMITTED: "submitted",
+    TaskState.TASK_STATE_WORKING: "working",
+    TaskState.TASK_STATE_INPUT_REQUIRED: "input-required",
+    TaskState.TASK_STATE_COMPLETED: "completed",
+    TaskState.TASK_STATE_CANCELED: "canceled",
+    TaskState.TASK_STATE_FAILED: "failed",
+    TaskState.TASK_STATE_REJECTED: "rejected",
+    TaskState.TASK_STATE_AUTH_REQUIRED: "auth-required",
 }
-_INPUT_REQUIRED_STATES = {"input-required", "input_required", "TASK_STATE_INPUT_REQUIRED"}
-_HEADER_VERSION = "1.0"
+_INPUT_REQUIRED_STATE = TaskState.TASK_STATE_INPUT_REQUIRED
 
 
 @dataclass
@@ -59,13 +84,7 @@ class CallResult:
 
 
 class A2AClient:
-    """JSON-RPC ベースの A2A v1.0 クライアント。
-
-    - `send_message`: `message/send` を呼び、Task を完了状態まで進める。
-      `input-required` を検出したら `InputRequired` 例外を上げて呼び出し側で resume させる。
-    - `resume_with_user_input`: 同じ task_id / context_id で `message/send` を追加投入。
-    - リトライは接続系と 5xx に限定 (registry の `defaults.retry`)。401/4xx は即時失敗。
-    """
+    """a2a-sdk ベースの A2A v1.0 クライアント (orchestrator 用アダプタ)。"""
 
     def __init__(
         self,
@@ -103,17 +122,60 @@ class A2AClient:
 
     @property
     def _endpoint(self) -> str:
-        # base_url 末尾を `/` に正規化して JSON-RPC 投入先を決める
         return self.agent.base_url.rstrip("/") + "/"
 
-    def _headers(self) -> dict[str, str]:
-        h = {
-            "Content-Type": "application/json",
-            "A2A-Version": _HEADER_VERSION,
-        }
+    def _bootstrap_card(self) -> AgentCard:
+        """SDK Client 構築用の最小 AgentCard を作る (実際の AgentCard 取得は card_cache が担当)。"""
+        return AgentCard(
+            name=self.agent.id,
+            supported_interfaces=[
+                AgentInterface(
+                    url=self._endpoint,
+                    protocol_binding="JSONRPC",
+                )
+            ],
+        )
+
+    def _build_sdk_client(self) -> BaseClient:
+        """a2a-sdk の BaseClient を共有 httpx.AsyncClient で組む。
+
+        共有 httpx クライアントを使うので、token ヘッダの注入と respx でのテスト
+        モックがそのまま動く。
+        """
+        http = self._http
         if self.token:
-            h["Authorization"] = f"Bearer {self.token}"
-        return h
+            http.headers["Authorization"] = f"Bearer {self.token}"
+        # 既存実装と同じく "A2A-Version: 1.0" を確実に乗せる (SDK は別ヘッダ名を使うため)
+        http.headers.setdefault("A2A-Version", "1.0")
+        card = self._bootstrap_card()
+        config = ClientConfig(httpx_client=http, streaming=False, polling=False)
+        transport = JsonRpcTransport(
+            httpx_client=http, agent_card=card, url=self._endpoint
+        )
+        return BaseClient(card, config, transport, interceptors=[])
+
+    def _build_request(
+        self,
+        text: str,
+        *,
+        context_id: str | None = None,
+        task_id: str | None = None,
+        skill_hint: str | None = None,
+    ) -> SendMessageRequest:
+        body_text = text if not skill_hint else f"[skill:{skill_hint}]\n{text}"
+        message = Message(
+            role=Role.ROLE_USER,
+            parts=[Part(text=body_text)],
+            message_id=uuid.uuid4().hex,
+        )
+        if context_id:
+            message.context_id = context_id
+        if task_id:
+            message.task_id = task_id
+        return SendMessageRequest(
+            message=message,
+            configuration=SendMessageConfiguration(),
+        )
 
     async def send_message(
         self,
@@ -123,17 +185,10 @@ class A2AClient:
         skill_hint: str | None = None,
     ) -> CallResult:
         """user メッセージを 1 回送信して Task を完了/中断状態まで進める。"""
-        message_id = uuid.uuid4().hex
-        body_text = text if not skill_hint else f"[skill:{skill_hint}]\n{text}"
-        message: dict[str, Any] = {
-            "role": "ROLE_USER",
-            "parts": [{"text": body_text}],
-            "messageId": message_id,
-        }
-        if context_id:
-            message["contextId"] = context_id
-        params: dict[str, Any] = {"message": message}
-        return await self._rpc_send_message(params)
+        request = self._build_request(
+            text, context_id=context_id, skill_hint=skill_hint
+        )
+        return await self._invoke(request)
 
     async def resume_with_user_input(
         self,
@@ -143,26 +198,12 @@ class A2AClient:
         context_id: str | None,
     ) -> CallResult:
         """`input-required` で中断した Task に追加情報を送って再開する。"""
-        message_id = uuid.uuid4().hex
-        message: dict[str, Any] = {
-            "role": "ROLE_USER",
-            "parts": [{"text": text}],
-            "messageId": message_id,
-            "taskId": task_id,
-        }
-        if context_id:
-            message["contextId"] = context_id
-        params = {"message": message}
-        return await self._rpc_send_message(params)
+        request = self._build_request(
+            text, context_id=context_id, task_id=task_id
+        )
+        return await self._invoke(request)
 
-    async def _rpc_send_message(self, params: dict[str, Any]) -> CallResult:
-        rpc_id = uuid.uuid4().hex
-        payload = {
-            "jsonrpc": "2.0",
-            "id": rpc_id,
-            "method": "SendMessage",
-            "params": params,
-        }
+    async def _invoke(self, request: SendMessageRequest) -> CallResult:
         with tracer.start_as_current_span(
             "a2a.send_message",
             attributes={
@@ -182,22 +223,21 @@ class A2AClient:
                     reraise=True,
                 ):
                     with attempt:
-                        resp = await self._post(payload)
+                        response = await self._send_once(request)
             except RetryError as e:
                 inner = e.last_attempt.exception() if e.last_attempt else None
                 if inner is not None:
                     raise inner
                 raise
 
-            result = self._parse_jsonrpc(resp)
-            normalized = self._normalize_result(result)
+            normalized = self._normalize_response(response)
             span.set_attribute("a2a.task.state", normalized.state)
             if normalized.task_id:
                 span.set_attribute("a2a.task.id", normalized.task_id)
             if normalized.context_id:
                 span.set_attribute("a2a.context.id", normalized.context_id)
-            if normalized.state in _INPUT_REQUIRED_STATES:
-                prompt = self._extract_prompt(normalized.raw or result)
+            if normalized.state == "input-required":
+                prompt = self._extract_prompt(normalized.raw or {})
                 raise InputRequired(
                     prompt,
                     task_id=normalized.task_id,
@@ -205,15 +245,36 @@ class A2AClient:
                 )
             return normalized
 
-    async def _post(self, payload: dict[str, Any]) -> httpx.Response:
+    async def _send_once(self, request: SendMessageRequest) -> StreamResponse:
+        sdk_client = self._build_sdk_client()
         try:
-            resp = await self._http.post(
-                self._endpoint, json=payload, headers=self._headers()
-            )
+            async for stream_response in sdk_client.send_message(request):
+                return stream_response
         except httpx.TimeoutException as e:
             raise RemoteAgentTimeout(str(e)) from e
         except httpx.TransportError as e:
             raise RemoteAgentUnavailable(str(e)) from e
+        except A2AClientTimeoutError as e:
+            raise RemoteAgentTimeout(str(e)) from e
+        except A2AError as e:
+            self._raise_for_a2a_error(e)
+        except httpx.HTTPStatusError as e:
+            self._raise_for_status(e.response)
+        raise RemoteAgentFailed("空応答")
+
+    @staticmethod
+    def _raise_for_a2a_error(exc: A2AError) -> None:
+        message = str(exc)
+        # SDK が発する HTTP エラーは status を文字列に持つことが多い。
+        # より具体的な内訳が読めない場合はまとめて RemoteAgentFailed として扱う。
+        if any(code in message for code in ("401", "403")):
+            raise RemoteAgentUnauthorized(message) from exc
+        if any(code in message for code in ("502", "503", "504")):
+            raise RemoteAgentUnavailable(message) from exc
+        raise RemoteAgentFailed(message) from exc
+
+    @staticmethod
+    def _raise_for_status(resp: httpx.Response) -> None:
         if resp.status_code in (401, 403):
             raise RemoteAgentUnauthorized(
                 f"{resp.status_code} {resp.text[:200]}"
@@ -223,68 +284,49 @@ class A2AClient:
                 f"{resp.status_code} {resp.text[:200]}"
             )
         if resp.status_code >= 400:
-            raise RemoteAgentFailed(f"HTTP {resp.status_code}: {resp.text[:200]}")
-        return resp
-
-    def _parse_jsonrpc(self, resp: httpx.Response) -> dict[str, Any]:
-        try:
-            data = resp.json()
-        except ValueError as e:
-            raise RemoteAgentFailed(f"非 JSON 応答: {resp.text[:200]}") from e
-        if "error" in data:
-            err = data["error"]
             raise RemoteAgentFailed(
-                f"JSON-RPC error code={err.get('code')} message={err.get('message')}"
+                f"HTTP {resp.status_code}: {resp.text[:200]}"
             )
-        result = data.get("result")
-        if result is None:
-            raise RemoteAgentFailed(f"JSON-RPC result 欠落: {data}")
-        return result
 
-    def _normalize_result(self, result: dict[str, Any]) -> CallResult:
-        """a2a-sdk 1.0 の SendMessageResponse は `result.task` / `result.message` の
-        oneof で返る。それ以外 (旧 kind=task/kind=message) も後方互換で受ける。
-        """
-        # v1.0 oneof: result.task or result.message
-        if isinstance(result.get("task"), dict):
-            return self._normalize_task(result["task"])
-        if isinstance(result.get("message"), dict):
-            return self._normalize_message(result["message"])
+    def _normalize_response(self, response: StreamResponse) -> CallResult:
+        if response.HasField("task"):
+            return self._normalize_task(response.task)
+        if response.HasField("message"):
+            return self._normalize_message(response.message)
+        raise RemoteAgentFailed("StreamResponse に task/message いずれも未設定")
 
-        # 後方互換: result そのものが Task / Message
-        kind = result.get("kind")
-        if kind == "message":
-            return self._normalize_message(result)
-        return self._normalize_task(result)
-
-    def _normalize_message(self, message: dict[str, Any]) -> CallResult:
-        text = self._collect_text_from_parts(message.get("parts") or message.get("content") or [])
-        return CallResult(
-            final_text=text,
-            state="completed",
-            task_id=None,
-            context_id=message.get("contextId"),
-            artifacts=[],
-            raw=message,
-        )
-
-    def _normalize_task(self, task: dict[str, Any]) -> CallResult:
-        status = task.get("status") or {}
-        raw_state = status.get("state") or task.get("state") or "unknown"
-        state = _STATE_MAP.get(str(raw_state), str(raw_state))
-        artifacts = task.get("artifacts") or []
-        text = self._collect_text_from_artifacts(artifacts)
-        if not text:
+    def _normalize_task(self, task: Task) -> CallResult:
+        state = _STATE_MAP.get(task.status.state, "unknown")
+        artifacts_raw = [
+            MessageToDict(a, preserving_proto_field_name=False)
+            for a in task.artifacts
+        ]
+        text = self._collect_text_from_artifacts(artifacts_raw)
+        if not text and task.status.HasField("message"):
             text = self._collect_text_from_parts(
-                ((status.get("message") or {}).get("parts")) or []
+                MessageToDict(
+                    task.status.message, preserving_proto_field_name=False
+                ).get("parts", [])
             )
         return CallResult(
             final_text=text,
             state=state,
-            task_id=task.get("id") or task.get("taskId"),
-            context_id=task.get("contextId"),
-            artifacts=artifacts,
-            raw=task,
+            task_id=task.id or None,
+            context_id=task.context_id or None,
+            artifacts=artifacts_raw,
+            raw=MessageToDict(task, preserving_proto_field_name=False),
+        )
+
+    def _normalize_message(self, message: Message) -> CallResult:
+        raw = MessageToDict(message, preserving_proto_field_name=False)
+        text = self._collect_text_from_parts(raw.get("parts", []))
+        return CallResult(
+            final_text=text,
+            state="completed",
+            task_id=None,
+            context_id=raw.get("contextId"),
+            artifacts=[],
+            raw=raw,
         )
 
     @staticmethod
@@ -297,7 +339,9 @@ class A2AClient:
         return "\n".join(chunks)
 
     @classmethod
-    def _collect_text_from_artifacts(cls, artifacts: list[dict[str, Any]]) -> str:
+    def _collect_text_from_artifacts(
+        cls, artifacts: list[dict[str, Any]]
+    ) -> str:
         chunks: list[str] = []
         for a in artifacts or []:
             t = cls._collect_text_from_parts(a.get("parts") or [])
@@ -306,8 +350,8 @@ class A2AClient:
         return "\n\n".join(chunks)
 
     @staticmethod
-    def _extract_prompt(result: dict[str, Any]) -> str:
-        status = result.get("status") or {}
+    def _extract_prompt(raw_task: dict[str, Any]) -> str:
+        status = raw_task.get("status") or {}
         msg = status.get("message") or {}
         parts = msg.get("parts") or []
         for p in parts:
