@@ -1,0 +1,40 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: bridge-ri
+  namespace: orchestrator
+spec:
+  podSelector:
+    matchLabels:
+      app: bridge-ri
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # orchestrator pod のみ 8080 へ
+    - from:
+        - podSelector:
+            matchLabels:
+              app: orchestrator
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # ri_v10 (resource-intelligence) への HTTP (Service port 443 → containerPort 8000)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: resource-intelligence
+      ports:
+        - protocol: TCP
+          port: 443

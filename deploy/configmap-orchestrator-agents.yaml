@@ -63,6 +63,23 @@ data:
           base_url 末尾は `/a2a/v1` で、orchestrator の card_cache が
           `<base_url>/.well-known/agent-card.json` を取得する。
 
+      - id: ri-agent
+        display_name: "Resource Intelligence (OCI リソース検索・依存関係分析)"
+        base_url: "http://bridge-ri.orchestrator.svc:8080"
+        auth:
+          kind: bearer
+          token_env: RI_BRIDGE_A2A_TOKEN
+        enabled: true
+        tags: [oci, resource-discovery, read-only]
+        approval:
+          default: not_required
+        notes: |
+          ri_v10 (A2A v0.3) との互換のため bridge-ri (Deployment) 経由でアクセス。
+          ブリッジは A2A v1.0 で公開し、内部で v0.3 message/send に変換して
+          http://resource-intelligence.resource-intelligence.svc:443/a2a を叩く。
+          3 skill (resource-search / dependency-map / resource-creator) はすべて
+          Read-only のため事前承認不要。
+
       # 注: 将来「副作用あり / 承認必須」のリモートエージェント (例: incident-responder) が
       #     クラスタに追加されたら、ここに requires_approval: true のエントリを足し、
       #     orchestrator の承認 UI (Chainlit AskActionMessage) が動くことを確認する。

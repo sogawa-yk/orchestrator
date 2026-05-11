@@ -46,6 +46,14 @@ spec:
       ports:
         - protocol: TCP
           port: 80
+    # bridge-ri (resource-intelligence v0.3 ↔ v1.0 bridge, 同 namespace)
+    - to:
+        - podSelector:
+            matchLabels:
+              app: bridge-ri
+      ports:
+        - protocol: TCP
+          port: 8080
     # Langfuse
     - to:
         - namespaceSelector:

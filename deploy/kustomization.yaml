@@ -9,6 +9,9 @@ resources:
   - service.yaml
   - ingress.yaml
   - networkpolicy.yaml
+  - bridge-ri/deployment.yaml
+  - bridge-ri/service.yaml
+  - bridge-ri/networkpolicy.yaml
 labels:
   - pairs:
       app: orchestrator
