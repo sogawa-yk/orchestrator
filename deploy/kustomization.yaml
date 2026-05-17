@@ -5,6 +5,7 @@ resources:
   - serviceaccount.yaml
   - configmap-orchestrator-config.yaml
   - configmap-orchestrator-agents.yaml
+  - configmap-orchestrator-prompts.yaml
   - deployment.yaml
   - service.yaml
   - ingress.yaml

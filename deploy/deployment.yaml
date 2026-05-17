@@ -28,7 +28,7 @@ spec:
         - name: ocir-secret
       containers:
         - name: web
-          image: kix.ocir.io/nr3c2r62ocsa/orchestrator:0.3.0-a2a-sdk
+          image: kix.ocir.io/nr3c2r62ocsa/orchestrator/ui:0.5.0-thinking-ui
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -70,9 +70,14 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: ORCH_PROMPT_PATH
+              value: /etc/orchestrator/prompts/system.ja.md
           volumeMounts:
             - name: agents-config
               mountPath: /etc/orchestrator
+              readOnly: true
+            - name: prompts-config
+              mountPath: /etc/orchestrator/prompts
               readOnly: true
           resources:
             requests:
@@ -101,3 +106,9 @@ spec:
             items:
               - key: agents.yaml
                 path: agents.yaml
+        - name: prompts-config
+          configMap:
+            name: orchestrator-prompts
+            items:
+              - key: system.ja.md
+                path: system.ja.md

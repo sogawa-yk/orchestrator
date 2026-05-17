@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from agents import Agent, ModelSettings, OpenAIChatCompletionsModel
 
 from ..config import Settings, get_settings
-from ..observability.langfuse_setup import build_langfuse_openai_client
+from ..observability.langfuse_setup import build_openai_client
 from ..registry import Registry, load_registry
 from ..registry.card_cache import AgentCardCache
 from .context import OrchestratorContext
@@ -18,6 +19,15 @@ _PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 
 def _load_system_prompt() -> str:
+    external = os.environ.get("ORCH_PROMPT_PATH")
+    if external:
+        path = Path(external)
+        if path.is_file():
+            return path.read_text(encoding="utf-8")
+        logger.warning(
+            "ORCH_PROMPT_PATH=%s が指すファイルが存在しないためバンドル版にフォールバックします",
+            external,
+        )
     return (_PROMPTS_DIR / "system.ja.md").read_text(encoding="utf-8")
 
 
@@ -51,7 +61,7 @@ def build_context(settings: Settings | None = None) -> OrchestratorContext:
 def build_agent(context: OrchestratorContext) -> Agent[OrchestratorContext]:
     """ReAct エージェントを構築する (単一ループ)。"""
     s = context.settings
-    openai_client = build_langfuse_openai_client(s)
+    openai_client = build_openai_client(s)
     model = OpenAIChatCompletionsModel(model=s.orch_model, openai_client=openai_client)
 
     instructions = (
