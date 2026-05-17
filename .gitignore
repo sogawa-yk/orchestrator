@@ -16,4 +16,5 @@ Thumbs.db
 .env.*
 playwright-report/
 test-results/
+.playwright-mcp/
 
