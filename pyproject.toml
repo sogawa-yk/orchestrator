@@ -16,9 +16,11 @@ dependencies = [
     "opentelemetry-sdk>=1.27.0",
     "opentelemetry-api>=1.27.0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.27.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.27.0",
     "opentelemetry-instrumentation-httpx>=0.48b0",
     "opentelemetry-instrumentation-fastapi>=0.48b0",
-    "langfuse>=2.50.0",
+    "opentelemetry-instrumentation-openai-agents>=0.40.0",
+    "langfuse>=4.0.0",
     "structlog>=24.4.0",
     "a2a-sdk[http-server]>=1.0.2",
 ]

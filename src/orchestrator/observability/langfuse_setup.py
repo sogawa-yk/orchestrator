@@ -15,7 +15,10 @@ _lf_lock = threading.Lock()
 def get_langfuse_client(settings: Settings | None = None) -> Any | None:
     """Langfuse SDK クライアントをプロセス内で 1 度だけ生成して返す。
 
-    Public/Secret key が未設定なら None を返す (Langfuse 連携無効化)。
+    Trace 出力経路は `otel_setup._init_tracer` が登録する OTLP/HTTP exporter に
+    一本化しているため、ここでは `tracing_enabled=False` を指定し SDK 側の
+    TracerProvider 自動セットアップを抑止する。SDK は Datasets / Score 等の
+    API 用途に限定して使う。Public/Secret key が未設定なら None を返す。
     """
     global _lf_client
     s = settings or get_settings()
@@ -31,6 +34,7 @@ def get_langfuse_client(settings: Settings | None = None) -> Any | None:
                 public_key=s.langfuse_public_key,
                 secret_key=s.langfuse_secret_key,
                 host=s.langfuse_host,
+                tracing_enabled=False,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("Langfuse client 初期化失敗: %s", e)
@@ -38,22 +42,13 @@ def get_langfuse_client(settings: Settings | None = None) -> Any | None:
         return _lf_client
 
 
-def build_langfuse_openai_client(settings: Settings | None = None) -> Any:
-    """`langfuse.openai.AsyncOpenAI` で OCI Enterprise AI を呼ぶための AsyncOpenAI を返す。
+def build_openai_client(settings: Settings | None = None) -> Any:
+    """OCI Enterprise AI 向け `openai.AsyncOpenAI` を返す。
 
-    Langfuse 設定が無ければ素の `openai.AsyncOpenAI` を返す。
+    Langfuse への LLM trace は OTel 側 (OpenAIAgentsInstrumentor) で取得する設計のため、
+    ここでは `langfuse.openai` ラッパは使わない (使うと LLM call が二重計上される)。
     """
     s = settings or get_settings()
-    if s.langfuse_public_key and s.langfuse_secret_key:
-        try:
-            from langfuse.openai import AsyncOpenAI  # type: ignore[import-not-found]
-
-            return AsyncOpenAI(
-                api_key=s.openai_api_key,
-                base_url=s.openai_base_url,
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Langfuse openai ラッパ生成失敗、素の openai に fallback: %s", e)
     from openai import AsyncOpenAI
 
     return AsyncOpenAI(api_key=s.openai_api_key, base_url=s.openai_base_url)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -105,12 +106,19 @@ async def request_user_approval(
 ) -> dict[str, str]:
     """ユーザーに承認 UI を提示し、選択結果を返す。"""
     c = _ctx(ctx)
+    try:
+        payload_size = len(json.dumps(payload, ensure_ascii=False, default=str))
+    except Exception:  # noqa: BLE001
+        payload_size = -1
     with tracer.start_as_current_span(
         "tool.request_user_approval",
         attributes={
             "agent.id": agent_id,
             "skill.id": skill_id,
             "approval.reason": reason,
+            "approval.payload_size": payload_size,
+            # Langfuse Trace ビューでの入出力表示
+            "input.value": reason,
         },
     ) as span, _metrics.measure_tool_latency("request_user_approval"):
         result = await chainlit_ui.ask_action(
@@ -118,6 +126,7 @@ async def request_user_approval(
         )
         decision = result.get("decision", "rejected")
         span.set_attribute("approval.decision", decision)
+        span.set_attribute("output.value", decision)
         if decision in ("approved", "rejected", "timeout"):
             session_state.record_approval(
                 c.approval_decisions, agent_id, skill_id, decision  # type: ignore[arg-type]
@@ -136,44 +145,79 @@ async def call_remote_agent(
 ) -> dict[str, Any]:
     """リモートエージェントを A2A で呼び出す。承認チェックと input-required の自動再開を含む。"""
     c = _ctx(ctx)
-    agent = c.registry.get(agent_id)
-    if agent is None or not agent.enabled:
-        return {"error": f"agent_id={agent_id} は利用不能", "denied": False}
-
-    # AgentCard 取得 (policy 判定で使う)
-    token = resolve_bearer_token(agent)
-    card: dict[str, Any] | None = None
-    try:
-        card = await c.card_cache.get(agent.id, agent.base_url, token)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("AgentCard 取得失敗 agent=%s: %s", agent.id, e)
-
-    # 承認ポリシー判定
-    needs_approval = requires_approval(agent, skill_id, agent_card=card)
-    if needs_approval:
-        decision = session_state.get_approval(
-            c.approval_decisions, agent_id, skill_id
-        )
-        if decision != "approved":
+    # Span はメソッド全体を包む。registry 未登録や承認否認といった早期 return の
+    # 判断もすべて span attribute として記録するため。
+    with tracer.start_as_current_span(
+        "tool.call_remote_agent",
+        attributes={
+            "agent.id": agent_id,
+            "skill.id": skill_id,
+            "tool": "call_remote_agent",
+            # Langfuse Trace ビューに表示される入力。
+            "input.value": message,
+        },
+    ) as span, _metrics.measure_tool_latency("call_remote_agent"):
+        agent = c.registry.get(agent_id)
+        if agent is None or not agent.enabled:
+            span.set_attribute("routing.reason", "unknown_agent")
+            span.set_attribute("a2a.outcome", "rejected_unknown_agent")
+            span.set_attribute("output.value", f"agent_id={agent_id} は利用不能")
             _metrics.record_agent_call(agent_id, skill_id, "denied")
-            return {
-                "error": "承認が必要なスキルです。先に request_user_approval を呼んでください。",
-                "needs_approval": True,
-                "denied": True,
-            }
+            return {"error": f"agent_id={agent_id} は利用不能", "denied": False}
+        span.set_attribute("routing.reason", "from_registry_listed")
 
-    # context_id 解決 (Agent から渡されなければ前回値を再利用)
-    cid = context_id or c.context_ids.get(agent_id)
+        # AgentCard 取得 (policy 判定で使う)
+        token = resolve_bearer_token(agent)
+        card: dict[str, Any] | None = None
+        try:
+            card = await c.card_cache.get(agent.id, agent.base_url, token)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("AgentCard 取得失敗 agent=%s: %s", agent.id, e)
+            span.set_attribute("agent_card.fetch", "failed")
+        else:
+            span.set_attribute("agent_card.fetch", "ok")
 
-    span_attrs = {
-        "agent.id": agent_id,
-        "skill.id": skill_id,
-        "tool": "call_remote_agent",
-    }
-    if cid:
-        span_attrs["context.id"] = cid
+        # 承認ポリシー判定 — なぜ呼ぶ/呼ばないかを attribute で記録する。
+        needs_approval = requires_approval(agent, skill_id, agent_card=card)
+        if needs_approval:
+            cached_decision = session_state.get_approval(
+                c.approval_decisions, agent_id, skill_id
+            )
+            span.set_attribute("approval.cache_hit", cached_decision is not None)
+            if cached_decision != "approved":
+                span.set_attribute("approval.policy", "required_denied")
+                span.set_attribute("a2a.outcome", "denied_needs_approval")
+                span.set_attribute(
+                    "output.value",
+                    "承認が必要なスキルです。先に request_user_approval を呼んでください。",
+                )
+                _metrics.record_agent_call(agent_id, skill_id, "denied")
+                return {
+                    "error": "承認が必要なスキルです。先に request_user_approval を呼んでください。",
+                    "needs_approval": True,
+                    "denied": True,
+                }
+            span.set_attribute("approval.policy", "required_pre_approved")
+        else:
+            span.set_attribute("approval.policy", "not_required")
+            span.set_attribute("approval.cache_hit", False)
 
-    with tracer.start_as_current_span("tool.call_remote_agent", attributes=span_attrs) as span, _metrics.measure_tool_latency("call_remote_agent"):
+        # context_id 解決 — Agent からの明示 / 過去ターンの再利用 / 新規開始を区別する。
+        if context_id:
+            cid = context_id
+            span.set_attribute("context.id.source", "caller")
+            span.set_attribute("context.id.reused", False)
+        elif c.context_ids.get(agent_id):
+            cid = c.context_ids.get(agent_id)
+            span.set_attribute("context.id.source", "cached")
+            span.set_attribute("context.id.reused", True)
+        else:
+            cid = None
+            span.set_attribute("context.id.source", "none")
+            span.set_attribute("context.id.reused", False)
+        if cid:
+            span.set_attribute("context.id", cid)
+
         timeout_s = c.registry.defaults.timeout_seconds
         outcome = "failed"
         try:
@@ -192,6 +236,8 @@ async def call_remote_agent(
                     user_text = await chainlit_ui.ask_input(e.prompt)
                     if not user_text:
                         outcome = "input_required_canceled"
+                        span.set_attribute("a2a.outcome", outcome)
+                        span.set_attribute("output.value", "input-required で無応答のため中止")
                         _metrics.record_agent_call(agent_id, skill_id, outcome)
                         return {
                             "error": "input-required で無応答のため中止",
@@ -208,22 +254,37 @@ async def call_remote_agent(
                 else:
                     outcome = "success"
         except RemoteAgentUnauthorized as e:
+            span.set_attribute("a2a.outcome", "unauthorized")
+            span.set_attribute("output.value", f"unauthorized: {e}")
             _metrics.record_agent_call(agent_id, skill_id, "unauthorized")
             return {"error": f"unauthorized: {e}", "kind": "unauthorized"}
         except RemoteAgentUnavailable as e:
+            span.set_attribute("a2a.outcome", "unavailable")
+            span.set_attribute("output.value", f"unavailable: {e}")
             _metrics.record_agent_call(agent_id, skill_id, "unavailable")
             return {"error": f"unavailable: {e}", "kind": "unavailable"}
         except RemoteAgentTimeout as e:
+            span.set_attribute("a2a.outcome", "timeout")
+            span.set_attribute("output.value", f"timeout: {e}")
             _metrics.record_agent_call(agent_id, skill_id, "timeout")
             return {"error": f"timeout: {e}", "kind": "timeout"}
         except RemoteAgentFailed as e:
+            span.set_attribute("a2a.outcome", "failed")
+            span.set_attribute("output.value", f"failed: {e}")
             _metrics.record_agent_call(agent_id, skill_id, "failed")
             return {"error": f"failed: {e}", "kind": "failed"}
 
         if res.context_id:
             c.context_ids[agent_id] = res.context_id
 
+        # send_message が例外なく返ったが A2A タスク自体が failed の場合は outcome を上書き。
+        # (例: リモートが BadRequest を返したケース — 上位の retry/exception には乗らない)
+        if res.state == "failed":
+            outcome = "remote_failed"
+
         span.set_attribute("a2a.state", res.state)
+        span.set_attribute("a2a.outcome", outcome)
+        span.set_attribute("output.value", res.final_text or "")
         if res.task_id:
             span.set_attribute("a2a.task.id", res.task_id)
         _metrics.record_agent_call(agent_id, skill_id, outcome)
